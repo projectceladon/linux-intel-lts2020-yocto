@@ -7,7 +7,7 @@ menu "Trusty driver"
 
 config TRUSTY
 	tristate "Trusty core driver"
-	depends on ARM || ARM64
+	depends on ARM || ARM64 || X86
 	help
 	  Trusty is a secure OS that provides a Trusted Execution Environment
 	  (TEE) for Android.  Trusty runs on the same processor as Linux but is
@@ -87,6 +87,14 @@ config TRUSTY_DMA_BUF_FFA_TAG
 	  may depend on your SPM.
 
 	  If set to N, a default implementation which returns 0 will be used.
+
+config TRUSTY_X86_64
+	tristate "Trusty x86_64 driver"
+	select OF
+	select OF_EARLY_FLATTREE
+	help
+	Enable Trusty Intel architecture implementation.
+	default n
 
 endif # TRUSTY
 
