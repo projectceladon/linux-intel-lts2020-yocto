@@ -199,34 +199,31 @@ static void *cma_heap_do_vmap(struct cma_heap_buffer *buffer)
 	return vaddr;
 }
 
-static int cma_heap_vmap(struct dma_buf *dmabuf, struct dma_buf_map *map)
+static void *cma_heap_vmap(struct dma_buf *dmabuf)
 {
 	struct cma_heap_buffer *buffer = dmabuf->priv;
 	void *vaddr;
-	int ret = 0;
 
 	mutex_lock(&buffer->lock);
 	if (buffer->vmap_cnt) {
 		buffer->vmap_cnt++;
-		dma_buf_map_set_vaddr(map, buffer->vaddr);
+		vaddr = buffer->vaddr;
 		goto out;
 	}
 
 	vaddr = cma_heap_do_vmap(buffer);
-	if (IS_ERR(vaddr)) {
-		ret = PTR_ERR(vaddr);
+	if (IS_ERR(vaddr))
 		goto out;
-	}
+
 	buffer->vaddr = vaddr;
 	buffer->vmap_cnt++;
-	dma_buf_map_set_vaddr(map, buffer->vaddr);
 out:
 	mutex_unlock(&buffer->lock);
 
-	return ret;
+	return vaddr;
 }
 
-static void cma_heap_vunmap(struct dma_buf *dmabuf, struct dma_buf_map *map)
+static void cma_heap_vunmap(struct dma_buf *dmabuf, void *vaddr)
 {
 	struct cma_heap_buffer *buffer = dmabuf->priv;
 
@@ -236,7 +233,6 @@ static void cma_heap_vunmap(struct dma_buf *dmabuf, struct dma_buf_map *map)
 		buffer->vaddr = NULL;
 	}
 	mutex_unlock(&buffer->lock);
-	dma_buf_map_clear(map);
 }
 
 static void cma_heap_dma_buf_release(struct dma_buf *dmabuf)
@@ -247,9 +243,11 @@ static void cma_heap_dma_buf_release(struct dma_buf *dmabuf)
 	if (buffer->vmap_cnt > 0) {
 		WARN(1, "%s: buffer still mapped in the kernel\n", __func__);
 		vunmap(buffer->vaddr);
-		buffer->vaddr = NULL;
 	}
 
+	/* free page list */
+	kfree(buffer->pages);
+	/* release memory */
 	cma_release(cma_heap->cma, buffer->cma_pages, buffer->pagecount);
 	kfree(buffer);
 }
@@ -294,7 +292,7 @@ static struct dma_buf *cma_heap_allocate(struct dma_heap *heap,
 	if (align > CONFIG_CMA_ALIGNMENT)
 		align = CONFIG_CMA_ALIGNMENT;
 
-	cma_pages = cma_alloc(cma_heap->cma, pagecount, align, false);
+	cma_pages = cma_alloc(cma_heap->cma, pagecount, align, GFP_KERNEL);
 	if (!cma_pages)
 		goto free_buffer;
 
@@ -335,6 +333,7 @@ static struct dma_buf *cma_heap_allocate(struct dma_heap *heap,
 	buffer->pagecount = pagecount;
 
 	/* create the dmabuf */
+	exp_info.exp_name = dma_heap_get_name(heap);
 	exp_info.ops = &cma_heap_buf_ops;
 	exp_info.size = buffer->len;
 	exp_info.flags = fd_flags;
@@ -344,6 +343,7 @@ static struct dma_buf *cma_heap_allocate(struct dma_heap *heap,
 		ret = PTR_ERR(dmabuf);
 		goto free_pages;
 	}
+
 	return dmabuf;
 
 free_pages:

@@ -261,6 +261,12 @@ struct target_type {
 #define DM_TARGET_NOWAIT		0x00000080
 #define dm_target_supports_nowait(type) ((type)->features & DM_TARGET_NOWAIT)
 
+/*
+ * A target supports passing through inline crypto support.
+ */
+#define DM_TARGET_PASSES_CRYPTO		0x00000100
+#define dm_target_passes_crypto(type) ((type)->features & DM_TARGET_PASSES_CRYPTO)
+
 #ifdef CONFIG_BLK_DEV_ZONED
 #define DM_TARGET_MIXED_ZONED_MODEL	0x00000200
 #define dm_target_supports_mixed_zoned_model(type) \
@@ -550,6 +556,11 @@ void dm_table_run_md_queue_async(struct dm_table *t);
  */
 struct dm_table *dm_swap_table(struct mapped_device *md,
 			       struct dm_table *t);
+
+/*
+ * Table keyslot manager functions
+ */
+void dm_destroy_keyslot_manager(struct blk_keyslot_manager *ksm);
 
 /*
  * A wrapper around vmalloc.
