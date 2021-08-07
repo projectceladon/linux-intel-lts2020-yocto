@@ -1166,6 +1166,18 @@ bool kthread_mod_delayed_work(struct kthread_worker *worker,
 	}
 	ret = __kthread_cancel_work(work);
 
+	/*
+	 * Canceling could run in parallel from kthread_cancel_delayed_work_sync
+	 * and change work's canceling count as the spinlock is released and regain
+	 * in __kthread_cancel_work so we need to check the count again. Otherwise,
+	 * we might incorrectly queue the dwork and further cause
+	 * cancel_delayed_work_sync thread waiting for flush dwork endlessly.
+	 */
+	if (work->canceling) {
+		ret = false;
+		goto out;
+	}
+
 fast_queue:
 	__kthread_queue_delayed_work(worker, dwork, delay);
 out:

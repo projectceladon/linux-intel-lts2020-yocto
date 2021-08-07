@@ -32,6 +32,7 @@
 #include <linux/sched.h>
 #include <linux/pgtable.h>
 #include <linux/kasan.h>
+#include <linux/page_pinner.h>
 #include <linux/android_kabi.h>
 
 struct mempolicy;
@@ -572,6 +573,7 @@ struct vm_fault {
 	 */
 	unsigned long vma_flags;
 	pgprot_t vma_page_prot;
+	ANDROID_OEM_DATA_ARRAY(1, 2);
 };
 
 /* page entry size for vm->huge_fault() */
@@ -646,6 +648,10 @@ struct vm_operations_struct {
 	 */
 	struct page *(*find_special_page)(struct vm_area_struct *vma,
 					  unsigned long addr);
+
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	bool (*allow_speculation)(void);
+#endif
 
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
@@ -750,8 +756,13 @@ struct inode;
  */
 static inline int put_page_testzero(struct page *page)
 {
+	int ret;
+
 	VM_BUG_ON_PAGE(page_ref_count(page) == 0, page);
-	return page_ref_dec_and_test(page);
+	ret = page_ref_dec_and_test(page);
+	page_pinner_put_page(page);
+
+	return ret;
 }
 
 /*
@@ -1275,6 +1286,7 @@ static inline void put_page(struct page *page)
  */
 #define GUP_PIN_COUNTING_BIAS (1U << 10)
 
+void put_user_page(struct page *page);
 void unpin_user_page(struct page *page);
 void unpin_user_pages_dirty_lock(struct page **pages, unsigned long npages,
 				 bool make_dirty);
@@ -1785,11 +1797,13 @@ extern int fixup_user_fault(struct mm_struct *mm,
 extern vm_fault_t __handle_speculative_fault(struct mm_struct *mm,
 					     unsigned long address,
 					     unsigned int flags,
-					     struct vm_area_struct **vma);
+					     struct vm_area_struct **vma,
+					     struct pt_regs *regs);
 static inline vm_fault_t handle_speculative_fault(struct mm_struct *mm,
 						  unsigned long address,
 						  unsigned int flags,
-						  struct vm_area_struct **vma)
+						  struct vm_area_struct **vma,
+						  struct pt_regs *regs)
 {
 	/*
 	 * Try speculative page fault for multithreaded user space task only.
@@ -1798,7 +1812,7 @@ static inline vm_fault_t handle_speculative_fault(struct mm_struct *mm,
 		*vma = NULL;
 		return VM_FAULT_RETRY;
 	}
-	return __handle_speculative_fault(mm, address, flags, vma);
+	return __handle_speculative_fault(mm, address, flags, vma, regs);
 }
 extern bool can_reuse_spf_vma(struct vm_area_struct *vma,
 			      unsigned long address);
@@ -1806,7 +1820,8 @@ extern bool can_reuse_spf_vma(struct vm_area_struct *vma,
 static inline vm_fault_t handle_speculative_fault(struct mm_struct *mm,
 						  unsigned long address,
 						  unsigned int flags,
-						  struct vm_area_struct **vma)
+						  struct vm_area_struct **vma,
+						  struct pt_regs *regs)
 {
 	return VM_FAULT_RETRY;
 }
@@ -2778,6 +2793,9 @@ extern vm_fault_t filemap_fault(struct vm_fault *vmf);
 extern vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 		pgoff_t start_pgoff, pgoff_t end_pgoff);
 extern vm_fault_t filemap_page_mkwrite(struct vm_fault *vmf);
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+extern bool filemap_allow_speculation(void);
+#endif
 
 /* mm/page-writeback.c */
 int __must_check write_one_page(struct page *page);
@@ -3346,6 +3364,9 @@ unsigned long wp_shared_mapping_range(struct address_space *mapping,
 #endif
 
 extern int sysctl_nr_trim_pages;
+extern bool pte_map_lock_addr(struct vm_fault *vmf, unsigned long addr);
+extern int reclaim_shmem_address_space(struct address_space *mapping);
+extern int reclaim_pages_from_list(struct list_head *page_list);
 
 /**
  * seal_check_future_write - Check for F_SEAL_FUTURE_WRITE flag and handle it

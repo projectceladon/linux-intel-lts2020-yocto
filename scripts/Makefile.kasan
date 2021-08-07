@@ -3,6 +3,10 @@ CFLAGS_KASAN_NOSANITIZE := -fno-builtin
 KASAN_SHADOW_OFFSET ?= $(CONFIG_KASAN_SHADOW_OFFSET)
 
 cc-param = $(call cc-option, -mllvm -$(1), $(call cc-option, --param $(1)))
+<<<<<<< HEAD
+=======
+
+>>>>>>> c0dd8de2812d01cbf3f63034ca07bc070479abbb
 ifdef CONFIG_KASAN_STACK
 	stack_enable := 1
 else
@@ -47,10 +51,8 @@ else
 endif
 
 CFLAGS_KASAN := -fsanitize=kernel-hwaddress \
-		$(call cc-param,hwasan-instrument-stack=$(CONFIG_KASAN_STACK)) \
+		$(call cc-param,hwasan-instrument-stack=$(stack_enable)) \
 		$(call cc-param,hwasan-use-short-granules=0) \
-		-mllvm -hwasan-instrument-stack=$(stack_enable) \
-		-mllvm -hwasan-use-short-granules=0 \
 		$(instrumentation_flags)
 
 endif # CONFIG_KASAN_SW_TAGS

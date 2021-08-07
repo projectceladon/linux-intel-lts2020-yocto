@@ -30,6 +30,7 @@
 #include <linux/device/bus.h>
 #include <linux/device/class.h>
 #include <linux/device/driver.h>
+#include <linux/android_kabi.h>
 #include <asm/device.h>
 
 struct device;
@@ -553,6 +554,14 @@ struct device {
 #ifdef CONFIG_DMA_OPS_BYPASS
 	bool			dma_ops_bypass : 1;
 #endif
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+	ANDROID_KABI_RESERVE(5);
+	ANDROID_KABI_RESERVE(6);
+	ANDROID_KABI_RESERVE(7);
+	ANDROID_KABI_RESERVE(8);
 };
 
 /**
@@ -579,6 +588,10 @@ struct device_link {
 	u32 flags;
 	refcount_t rpm_active;
 	struct kref kref;
+#ifdef CONFIG_SRCU
+	/* Not currently used, here for potential abi issues in the future */
+	struct rcu_head rcu_head;
+#endif
 	struct work_struct rm_work;
 	bool supplier_preactivated; /* Owned by consumer probe. */
 	ANDROID_KABI_RESERVE(1);

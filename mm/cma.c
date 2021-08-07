@@ -443,6 +443,7 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 	int num_attempts = 0;
 	int max_retries = 5;
 	s64 ts;
+	struct cma_alloc_info cma_info = {0};
 
 	trace_android_vh_cma_alloc_start(&ts);
 
@@ -455,6 +456,8 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 	if (!count)
 		goto out;
 
+	trace_cma_alloc_start(cma->name, count, align);
+
 	mask = cma_bitmap_aligned_mask(cma, align);
 	offset = cma_bitmap_aligned_offset(cma, align);
 	bitmap_maxno = cma_bitmap_maxno(cma);
@@ -464,6 +467,8 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 		goto out;
 
 	for (;;) {
+		struct acr_info info = {0};
+
 		mutex_lock(&cma->lock);
 		bitmap_no = bitmap_find_next_zero_area_off(cma->bitmap,
 				bitmap_maxno, start, bitmap_count, mask,
@@ -472,7 +477,8 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 			if ((num_attempts < max_retries) && (ret == -EBUSY)) {
 				mutex_unlock(&cma->lock);
 
-				if (fatal_signal_pending(current))
+				if (fatal_signal_pending(current) ||
+				    (gfp_mask & __GFP_NORETRY))
 					break;
 
 				/*
@@ -501,7 +507,18 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 		mutex_unlock(&cma->lock);
 
 		pfn = cma->base_pfn + (bitmap_no << cma->order_per_bit);
-		ret = alloc_contig_range(pfn, pfn + count, MIGRATE_CMA, gfp_mask);
+		ret = alloc_contig_range(pfn, pfn + count, MIGRATE_CMA, gfp_mask, &info);
+		cma_info.nr_migrated += info.nr_migrated;
+		cma_info.nr_reclaimed += info.nr_reclaimed;
+		cma_info.nr_mapped += info.nr_mapped;
+		if (info.err) {
+			if (info.err & ACR_ERR_ISOLATE)
+				cma_info.nr_isolate_fail++;
+			if (info.err & ACR_ERR_MIGRATE)
+				cma_info.nr_migrate_fail++;
+			if (info.err & ACR_ERR_TEST)
+				cma_info.nr_test_fail++;
+		}
 		if (ret == 0) {
 			page = pfn_to_page(pfn);
 			break;
@@ -513,11 +530,23 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 
 		pr_debug("%s(): memory range at %p is busy, retrying\n",
 			 __func__, pfn_to_page(pfn));
-		/* try again with a bit different memory target */
-		start = bitmap_no + mask + 1;
+
+		trace_cma_alloc_busy_retry(cma->name, pfn, pfn_to_page(pfn),
+					   count, align);
+
+		if (info.failed_pfn && gfp_mask & __GFP_NORETRY) {
+			/* try again from following failed page */
+			start = (pfn_max_align_up(info.failed_pfn + 1) -
+				 cma->base_pfn) >> cma->order_per_bit;
+
+		} else {
+			/* try again with a bit different memory target */
+			start = bitmap_no + mask + 1;
+		}
 	}
 
-	trace_cma_alloc(pfn, page, count, align);
+	trace_cma_alloc_finish(cma->name, pfn, page, count, align);
+	trace_cma_alloc_info(cma->name, page, count, align, &cma_info);
 
 	/*
 	 * CMA can allocate multiple page blocks, which results in different
@@ -579,7 +608,7 @@ bool cma_release(struct cma *cma, const struct page *pages, unsigned int count)
 
 	free_contig_range(pfn, count);
 	cma_clear_bitmap(cma, pfn, count);
-	trace_cma_release(pfn, pages, count);
+	trace_cma_release(cma->name, pfn, pages, count);
 
 	return true;
 }

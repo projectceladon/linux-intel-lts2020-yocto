@@ -62,6 +62,7 @@
 #include <linux/sched/rt.h>
 #include <linux/sched/mm.h>
 #include <linux/page_owner.h>
+#include <linux/page_pinner.h>
 #include <linux/kthread.h>
 #include <linux/memcontrol.h>
 #include <linux/ftrace.h>
@@ -394,7 +395,7 @@ int page_group_by_mobility_disabled __read_mostly;
 static DEFINE_STATIC_KEY_TRUE(deferred_pages);
 
 /*
- * Calling kasan_free_pages() only after deferred memory initialization
+ * Calling kasan_poison_pages() only after deferred memory initialization
  * has completed. Poisoning pages during deferred memory init will greatly
  * lengthen the process and cause problem in large memory systems as the
  * deferred pages initialization is done with interrupt disabled.
@@ -406,15 +407,12 @@ static DEFINE_STATIC_KEY_TRUE(deferred_pages);
  * on-demand allocation and then freed again before the deferred pages
  * initialization is done, but this is not likely to happen.
  */
-static inline void kasan_free_nondeferred_pages(struct page *page, int order,
-						bool init, fpi_t fpi_flags)
+static inline bool should_skip_kasan_poison(struct page *page, fpi_t fpi_flags)
 {
-	if (static_branch_unlikely(&deferred_pages))
-		return;
-	if (!IS_ENABLED(CONFIG_KASAN_GENERIC) &&
-			(fpi_flags & FPI_SKIP_KASAN_POISON))
-		return;
-	kasan_free_pages(page, order, init);
+	return static_branch_unlikely(&deferred_pages) ||
+	       (!IS_ENABLED(CONFIG_KASAN_GENERIC) &&
+		(fpi_flags & FPI_SKIP_KASAN_POISON)) ||
+	       PageSkipKASanPoison(page);
 }
 
 /* Returns true if the struct page for the pfn is uninitialised */
@@ -465,13 +463,11 @@ defer_init(int nid, unsigned long pfn, unsigned long end_pfn)
 	return false;
 }
 #else
-static inline void kasan_free_nondeferred_pages(struct page *page, int order,
-						bool init, fpi_t fpi_flags)
+static inline bool should_skip_kasan_poison(struct page *page, fpi_t fpi_flags)
 {
-	if (!IS_ENABLED(CONFIG_KASAN_GENERIC) &&
-			(fpi_flags & FPI_SKIP_KASAN_POISON))
-		return;
-	kasan_free_pages(page, order, init);
+	return (!IS_ENABLED(CONFIG_KASAN_GENERIC) &&
+		(fpi_flags & FPI_SKIP_KASAN_POISON)) ||
+	       PageSkipKASanPoison(page);
 }
 
 static inline bool early_page_uninitialised(unsigned long pfn)
@@ -816,20 +812,7 @@ static inline void clear_page_guard(struct zone *zone, struct page *page,
  */
 void init_mem_debugging_and_hardening(void)
 {
-	if (_init_on_alloc_enabled_early) {
-		if (page_poisoning_enabled())
-			pr_info("mem auto-init: CONFIG_PAGE_POISONING is on, "
-				"will take precedence over init_on_alloc\n");
-		else
-			static_branch_enable(&init_on_alloc);
-	}
-	if (_init_on_free_enabled_early) {
-		if (page_poisoning_enabled())
-			pr_info("mem auto-init: CONFIG_PAGE_POISONING is on, "
-				"will take precedence over init_on_free\n");
-		else
-			static_branch_enable(&init_on_free);
-	}
+	bool page_poisoning_requested = false;
 
 #ifdef CONFIG_PAGE_POISONING
 	/*
@@ -838,9 +821,26 @@ void init_mem_debugging_and_hardening(void)
 	 */
 	if (page_poisoning_enabled() ||
 	     (!IS_ENABLED(CONFIG_ARCH_SUPPORTS_DEBUG_PAGEALLOC) &&
-	      debug_pagealloc_enabled()))
+	      debug_pagealloc_enabled())) {
 		static_branch_enable(&_page_poisoning_enabled);
+		page_poisoning_requested = true;
+	}
 #endif
+
+	if (_init_on_alloc_enabled_early) {
+		if (page_poisoning_requested)
+			pr_info("mem auto-init: CONFIG_PAGE_POISONING is on, "
+				"will take precedence over init_on_alloc\n");
+		else
+			static_branch_enable(&init_on_alloc);
+	}
+	if (_init_on_free_enabled_early) {
+		if (page_poisoning_requested)
+			pr_info("mem auto-init: CONFIG_PAGE_POISONING is on, "
+				"will take precedence over init_on_free\n");
+		else
+			static_branch_enable(&init_on_free);
+	}
 
 #ifdef CONFIG_DEBUG_PAGEALLOC
 	if (!debug_pagealloc_enabled())
@@ -1252,9 +1252,15 @@ out:
 	return ret;
 }
 
-static void kernel_init_free_pages(struct page *page, int numpages)
+static void kernel_init_free_pages(struct page *page, int numpages, bool zero_tags)
 {
 	int i;
+
+	if (zero_tags) {
+		for (i = 0; i < numpages; i++)
+			tag_clear_highpage(page + i);
+		return;
+	}
 
 	/* s390's use of memset() could override KASAN redzones. */
 	kasan_disable_current();
@@ -1271,7 +1277,7 @@ static __always_inline bool free_pages_prepare(struct page *page,
 			unsigned int order, bool check_free, fpi_t fpi_flags)
 {
 	int bad = 0;
-	bool init;
+	bool skip_kasan_poison = should_skip_kasan_poison(page, fpi_flags);
 
 	VM_BUG_ON_PAGE(PageTail(page), page);
 
@@ -1285,6 +1291,7 @@ static __always_inline bool free_pages_prepare(struct page *page,
 		if (memcg_kmem_enabled() && PageKmemcg(page))
 			__memcg_kmem_uncharge_page(page, order);
 		reset_page_owner(page, order);
+		free_page_pinner(page, order);
 		return false;
 	}
 
@@ -1322,6 +1329,7 @@ static __always_inline bool free_pages_prepare(struct page *page,
 	page_cpupid_reset_last(page);
 	page->flags &= ~PAGE_FLAGS_CHECK_AT_PREP;
 	reset_page_owner(page, order);
+	free_page_pinner(page, order);
 
 	if (!PageHighMem(page)) {
 		debug_check_no_locks_freed(page_address(page),
@@ -1340,10 +1348,17 @@ static __always_inline bool free_pages_prepare(struct page *page,
 	 * With hardware tag-based KASAN, memory tags must be set before the
 	 * page becomes unavailable via debug_pagealloc or arch_free_page.
 	 */
-	init = want_init_on_free();
-	if (init && !kasan_has_integrated_init())
-		kernel_init_free_pages(page, 1 << order);
-	kasan_free_nondeferred_pages(page, order, init, fpi_flags);
+	if (kasan_has_integrated_init()) {
+		if (!skip_kasan_poison)
+			kasan_free_pages(page, order);
+	} else {
+		bool init = want_init_on_free();
+
+		if (init)
+			kernel_init_free_pages(page, 1 << order, false);
+		if (!skip_kasan_poison)
+			kasan_poison_pages(page, order, init);
+	}
 
 	/*
 	 * arch_free_page() can make the page's contents inaccessible.  s390
@@ -2338,8 +2353,6 @@ static bool check_new_pages(struct page *page, unsigned int order)
 inline void post_alloc_hook(struct page *page, unsigned int order,
 				gfp_t gfp_flags)
 {
-	bool init;
-
 	set_page_private(page, 0);
 	set_page_refcounted(page);
 
@@ -2347,16 +2360,28 @@ inline void post_alloc_hook(struct page *page, unsigned int order,
 	debug_pagealloc_map_pages(page, 1 << order);
 
 	/*
+	 * Page unpoisoning must happen before memory initialization.
+	 * Otherwise, the poison pattern will be overwritten for __GFP_ZERO
+	 * allocations and the page unpoisoning code will complain.
+	 */
+	kernel_unpoison_pages(page, 1 << order);
+
+	/*
 	 * As memory initialization might be integrated into KASAN,
 	 * kasan_alloc_pages and kernel_init_free_pages must be
 	 * kept together to avoid discrepancies in behavior.
 	 */
-	init = !want_init_on_free() && want_init_on_alloc(gfp_flags);
-	kasan_alloc_pages(page, order, init);
-	if (init && !kasan_has_integrated_init())
-		kernel_init_free_pages(page, 1 << order);
+	if (kasan_has_integrated_init()) {
+		kasan_alloc_pages(page, order, gfp_flags);
+	} else {
+		bool init = !want_init_on_free() && want_init_on_alloc(gfp_flags);
 
-	kernel_unpoison_pages(page, 1 << order);
+		kasan_unpoison_pages(page, order, init);
+		if (init)
+			kernel_init_free_pages(page, 1 << order,
+					       gfp_flags & __GFP_ZEROTAGS);
+	}
+
 	set_page_owner(page, order, gfp_flags);
 }
 
@@ -8521,7 +8546,7 @@ static unsigned long pfn_max_align_down(unsigned long pfn)
 			     pageblock_nr_pages) - 1);
 }
 
-static unsigned long pfn_max_align_up(unsigned long pfn)
+unsigned long pfn_max_align_up(unsigned long pfn)
 {
 	return ALIGN(pfn, max_t(unsigned long, MAX_ORDER_NR_PAGES,
 				pageblock_nr_pages));
@@ -8536,10 +8561,20 @@ static void alloc_contig_dump_pages(struct list_head *page_list)
 
 	if (DYNAMIC_DEBUG_BRANCH(descriptor)) {
 		struct page *page;
+		unsigned long nr_skip = 0;
+		unsigned long nr_pages = 0;
 
 		dump_stack();
-		list_for_each_entry(page, page_list, lru)
+		list_for_each_entry(page, page_list, lru) {
+			nr_pages++;
+			/* The page will be freed by putback_movable_pages soon */
+			if (page_count(page) == 1) {
+				nr_skip++;
+				continue;
+			}
 			dump_page(page, "migration failure");
+		}
+		pr_warn("total dump_pages %lu skipping %lu\n", nr_pages, nr_skip);
 	}
 }
 #else
@@ -8550,7 +8585,8 @@ static inline void alloc_contig_dump_pages(struct list_head *page_list)
 
 /* [start, end) must belong to a single zone. */
 static int __alloc_contig_migrate_range(struct compact_control *cc,
-					unsigned long start, unsigned long end)
+					unsigned long start, unsigned long end,
+					struct acr_info *info)
 {
 	/* This function is based on compact_zone() from compaction.c. */
 	unsigned int nr_reclaimed;
@@ -8558,6 +8594,7 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 	unsigned int tries = 0;
 	unsigned int max_tries = 5;
 	int ret = 0;
+	struct page *page;
 	struct migration_target_control mtc = {
 		.nid = zone_to_nid(cc->zone),
 		.gfp_mask = GFP_USER | __GFP_MOVABLE | __GFP_RETRY_MAYFAIL,
@@ -8589,16 +8626,32 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 
 		nr_reclaimed = reclaim_clean_pages_from_list(cc->zone,
 							&cc->migratepages);
+		info->nr_reclaimed += nr_reclaimed;
 		cc->nr_migratepages -= nr_reclaimed;
+
+		list_for_each_entry(page, &cc->migratepages, lru)
+			info->nr_mapped += page_mapcount(page);
 
 		ret = migrate_pages(&cc->migratepages, alloc_migration_target,
 				NULL, (unsigned long)&mtc, cc->mode, MR_CONTIG_RANGE);
+		if (!ret)
+			info->nr_migrated += cc->nr_migratepages;
 	}
 
 	lru_cache_enable();
 	if (ret < 0) {
-		alloc_contig_dump_pages(&cc->migratepages);
+		if (ret == -EBUSY) {
+			alloc_contig_dump_pages(&cc->migratepages);
+			page_pinner_mark_migration_failed_pages(&cc->migratepages);
+		}
+
+		if (!list_empty(&cc->migratepages)) {
+			page = list_first_entry(&cc->migratepages, struct page , lru);
+			info->failed_pfn = page_to_pfn(page);
+		}
+
 		putback_movable_pages(&cc->migratepages);
+		info->err |= ACR_ERR_MIGRATE;
 		return ret;
 	}
 	return 0;
@@ -8626,7 +8679,8 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
  * need to be freed with free_contig_range().
  */
 int alloc_contig_range(unsigned long start, unsigned long end,
-		       unsigned migratetype, gfp_t gfp_mask)
+		       unsigned migratetype, gfp_t gfp_mask,
+		       struct acr_info *info)
 {
 	unsigned long outer_start, outer_end;
 	unsigned int order;
@@ -8669,9 +8723,14 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 	 */
 
 	ret = start_isolate_page_range(pfn_max_align_down(start),
-				       pfn_max_align_up(end), migratetype, 0);
-	if (ret)
+				       pfn_max_align_up(end), migratetype, 0,
+				       &info->failed_pfn);
+	if (ret) {
+		info->err |= ACR_ERR_ISOLATE;
 		return ret;
+	}
+
+	drain_all_pages(cc.zone);
 
 	/*
 	 * In case of -EBUSY, we'd like to know which page causes problem.
@@ -8683,8 +8742,8 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 	 * allocated.  So, if we fall through be sure to clear ret so that
 	 * -EBUSY is not accidentally used or returned to caller.
 	 */
-	ret = __alloc_contig_migrate_range(&cc, start, end);
-	if (ret && ret != -EBUSY)
+	ret = __alloc_contig_migrate_range(&cc, start, end, info);
+	if (ret && (ret != -EBUSY || (gfp_mask & __GFP_NORETRY)))
 		goto done;
 	ret =0;
 
@@ -8729,10 +8788,11 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 	}
 
 	/* Make sure the range is really isolated. */
-	if (test_pages_isolated(outer_start, end, 0)) {
+	if (test_pages_isolated(outer_start, end, 0, &info->failed_pfn)) {
 		pr_info_ratelimited("%s: [%lx, %lx) PFNs busy\n",
 			__func__, outer_start, end);
 		ret = -EBUSY;
+		info->err |= ACR_ERR_TEST;
 		goto done;
 	}
 
@@ -8759,10 +8819,11 @@ EXPORT_SYMBOL(alloc_contig_range);
 static int __alloc_contig_pages(unsigned long start_pfn,
 				unsigned long nr_pages, gfp_t gfp_mask)
 {
+	struct acr_info dummy;
 	unsigned long end_pfn = start_pfn + nr_pages;
 
 	return alloc_contig_range(start_pfn, end_pfn, MIGRATE_MOVABLE,
-				  gfp_mask);
+				  gfp_mask, &dummy);
 }
 
 static bool pfn_range_valid_contig(struct zone *z, unsigned long start_pfn,
