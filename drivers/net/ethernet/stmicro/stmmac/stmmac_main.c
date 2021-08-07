@@ -187,11 +187,7 @@ static void stmmac_verify_args(void)
 		eee_timer = STMMAC_DEFAULT_LPI_TIMER;
 }
 
-/**
- * stmmac_disable_all_queues - Disable all queues
- * @priv: driver private structure
- */
-static void stmmac_disable_all_queues(struct stmmac_priv *priv)
+static void __stmmac_disable_all_queues(struct stmmac_priv *priv)
 {
 	u32 rx_queues_cnt = priv->plat->rx_queues_to_use;
 	u32 tx_queues_cnt = priv->plat->tx_queues_to_use;
@@ -215,14 +211,12 @@ static void stmmac_disable_all_queues(struct stmmac_priv *priv)
 }
 
 /**
- * stmmac_enable_all_queues - Enable all queues
+ * stmmac_disable_all_queues - Disable all queues
  * @priv: driver private structure
  */
-static void stmmac_enable_all_queues(struct stmmac_priv *priv)
+static void stmmac_disable_all_queues(struct stmmac_priv *priv)
 {
 	u32 rx_queues_cnt = priv->plat->rx_queues_to_use;
-	u32 tx_queues_cnt = priv->plat->tx_queues_to_use;
-	u32 maxq = max(rx_queues_cnt, tx_queues_cnt);
 	struct stmmac_rx_queue *rx_q;
 	u32 queue;
 
@@ -234,6 +228,20 @@ static void stmmac_enable_all_queues(struct stmmac_priv *priv)
 			break;
 		}
 	}
+
+	__stmmac_disable_all_queues(priv);
+}
+
+/**
+ * stmmac_enable_all_queues - Enable all queues
+ * @priv: driver private structure
+ */
+static void stmmac_enable_all_queues(struct stmmac_priv *priv)
+{
+	u32 rx_queues_cnt = priv->plat->rx_queues_to_use;
+	u32 tx_queues_cnt = priv->plat->tx_queues_to_use;
+	u32 maxq = max(rx_queues_cnt, tx_queues_cnt);
+	u32 queue;
 
 	for (queue = 0; queue < maxq; queue++) {
 		struct stmmac_channel *ch = &priv->channel[queue];
@@ -923,6 +931,11 @@ static void stmmac_validate(struct phylink_config *config,
 	if ((max_speed > 0) && (max_speed < 1000)) {
 		phylink_set(mask, 1000baseT_Full);
 		phylink_set(mask, 1000baseX_Full);
+	} else if (priv->plat->has_gmac4) {
+		if (!max_speed || max_speed >= 2500) {
+			phylink_set(mac_supported, 2500baseT_Full);
+			phylink_set(mac_supported, 2500baseX_Full);
+		}
 	} else if (priv->plat->has_xgmac) {
 		if (!max_speed || (max_speed >= 2500)) {
 			phylink_set(mac_supported, 2500baseT_Full);
@@ -988,29 +1001,14 @@ static void stmmac_validate(struct phylink_config *config,
 	linkmode_andnot(state->advertising, state->advertising, mask);
 
 	/* If PCS is supported, check which modes it supports. */
-	stmmac_xpcs_validate(priv, &priv->hw->xpcs_args, supported, state);
-}
-
-static void stmmac_mac_pcs_get_state(struct phylink_config *config,
-				     struct phylink_link_state *state)
-{
-	struct stmmac_priv *priv = netdev_priv(to_net_dev(config->dev));
-
-	state->link = 0;
-	stmmac_xpcs_get_state(priv, &priv->hw->xpcs_args, state);
+	if (priv->hw->xpcs)
+		xpcs_validate(priv->hw->xpcs, supported, state);
 }
 
 static void stmmac_mac_config(struct phylink_config *config, unsigned int mode,
 			      const struct phylink_link_state *state)
 {
-	struct stmmac_priv *priv = netdev_priv(to_net_dev(config->dev));
-
-	stmmac_xpcs_config(priv, &priv->hw->xpcs_args, state);
-}
-
-static void stmmac_mac_an_restart(struct phylink_config *config)
-{
-	/* Not Supported */
+	/* Nothing to do, xpcs_config() handles everything */
 }
 
 static void stmmac_fpe_link_state_handle(struct stmmac_priv *priv, bool is_up)
@@ -1023,8 +1021,8 @@ static void stmmac_fpe_link_state_handle(struct stmmac_priv *priv, bool is_up)
 	if (is_up && *hs_enable) {
 		stmmac_fpe_send_mpacket(priv, priv->ioaddr, MPACKET_VERIFY);
 	} else {
-		*lo_state = FPE_EVENT_UNKNOWN;
-		*lp_state = FPE_EVENT_UNKNOWN;
+		*lo_state = FPE_STATE_OFF;
+		*lp_state = FPE_STATE_OFF;
 	}
 }
 
@@ -1051,8 +1049,6 @@ static void stmmac_mac_link_up(struct phylink_config *config,
 {
 	struct stmmac_priv *priv = netdev_priv(to_net_dev(config->dev));
 	u32 ctrl;
-
-	stmmac_xpcs_link_up(priv, &priv->hw->xpcs_args, speed, interface);
 
 	ctrl = readl(priv->ioaddr + MAC_CTRL_REG);
 	ctrl &= ~priv->hw->link.speed_mask;
@@ -1146,9 +1142,7 @@ static void stmmac_mac_link_up(struct phylink_config *config,
 
 static const struct phylink_mac_ops stmmac_phylink_mac_ops = {
 	.validate = stmmac_validate,
-	.mac_pcs_get_state = stmmac_mac_pcs_get_state,
 	.mac_config = stmmac_mac_config,
-	.mac_an_restart = stmmac_mac_an_restart,
 	.mac_link_down = stmmac_mac_link_down,
 	.mac_link_up = stmmac_mac_link_up,
 };
@@ -1188,7 +1182,6 @@ static void stmmac_check_pcs_mode(struct stmmac_priv *priv)
  */
 static int stmmac_init_phy(struct net_device *dev)
 {
-	struct ethtool_wolinfo wol = { .cmd = ETHTOOL_GWOL };
 	struct stmmac_priv *priv = netdev_priv(dev);
 	struct device_node *node;
 	int ret;
@@ -1214,8 +1207,12 @@ static int stmmac_init_phy(struct net_device *dev)
 		ret = phylink_connect_phy(priv->phylink, phydev);
 	}
 
-	phylink_ethtool_get_wol(priv->phylink, &wol);
-	device_set_wakeup_capable(priv->device, !!wol.supported);
+	if (!priv->plat->pmt) {
+		struct ethtool_wolinfo wol = { .cmd = ETHTOOL_GWOL };
+
+		phylink_ethtool_get_wol(priv->phylink, &wol);
+		device_set_wakeup_capable(priv->device, !!wol.supported);
+	}
 
 	return ret;
 }
@@ -1229,8 +1226,9 @@ static int stmmac_phy_setup(struct stmmac_priv *priv)
 	priv->phylink_config.dev = &priv->dev->dev;
 	priv->phylink_config.type = PHYLINK_NETDEV;
 	priv->phylink_config.pcs_poll = true;
-	priv->phylink_config.ovr_an_inband =
-		priv->plat->mdio_bus_data->xpcs_an_inband;
+	if (priv->plat->mdio_bus_data)
+		priv->phylink_config.ovr_an_inband =
+			priv->plat->mdio_bus_data->xpcs_an_inband;
 
 	if (!fwnode)
 		fwnode = dev_fwnode(priv->device);
@@ -1239,6 +1237,9 @@ static int stmmac_phy_setup(struct stmmac_priv *priv)
 				 mode, &stmmac_phylink_mac_ops);
 	if (IS_ERR(phylink))
 		return PTR_ERR(phylink);
+
+	if (priv->hw->xpcs)
+		phylink_set_pcs(phylink, &priv->hw->xpcs->pcs);
 
 	priv->phylink = phylink;
 	return 0;
@@ -1736,7 +1737,7 @@ static int __init_dma_rx_desc_rings(struct stmmac_priv *priv, u32 queue, gfp_t f
 	}
 
 	rx_q->cur_rx = 0;
-	rx_q->dirty_rx = (-1 & (priv->dma_rx_size - 1));
+	rx_q->dirty_rx = 0;
 
 	/* Setup the chained descriptor addresses */
 	if (priv->mode == STMMAC_CHAIN_MODE) {
@@ -3229,7 +3230,8 @@ static void stmmac_safety_feat_configuration(struct stmmac_priv *priv)
 {
 	if (priv->dma_cap.asp) {
 		netdev_info(priv->dev, "Enabling Safety Features\n");
-		stmmac_safety_feat_config(priv, priv->ioaddr, priv->dma_cap.asp);
+		stmmac_safety_feat_config(priv, priv->ioaddr, priv->dma_cap.asp,
+					  priv->plat->safety_feat_cfg);
 	} else {
 		netdev_info(priv->dev, "No Safety Features support found\n");
 	}
@@ -3471,8 +3473,8 @@ static void stmmac_free_irq(struct net_device *dev,
 
 static int stmmac_request_irq_multi_msi(struct net_device *dev)
 {
-	enum request_irq_err irq_err = REQ_IRQ_ERR_NO;
 	struct stmmac_priv *priv = netdev_priv(dev);
+	enum request_irq_err irq_err;
 	cpumask_t cpu_mask;
 	int irq_idx = 0;
 	char *int_name;
@@ -3619,8 +3621,8 @@ irq_error:
 
 static int stmmac_request_irq_single(struct net_device *dev)
 {
-	enum request_irq_err irq_err = REQ_IRQ_ERR_NO;
 	struct stmmac_priv *priv = netdev_priv(dev);
+	enum request_irq_err irq_err;
 	int ret;
 
 	ret = request_irq(dev->irq, stmmac_interrupt,
@@ -3630,7 +3632,7 @@ static int stmmac_request_irq_single(struct net_device *dev)
 			   "%s: ERROR: allocating the IRQ %d (error: %d)\n",
 			   __func__, dev->irq, ret);
 		irq_err = REQ_IRQ_ERR_MAC;
-		return ret;
+		goto irq_error;
 	}
 
 	/* Request the Wake IRQ in case of another line
@@ -3644,7 +3646,7 @@ static int stmmac_request_irq_single(struct net_device *dev)
 				   "%s: ERROR: allocating the WoL IRQ %d (%d)\n",
 				   __func__, priv->wol_irq, ret);
 			irq_err = REQ_IRQ_ERR_WOL;
-			return ret;
+			goto irq_error;
 		}
 	}
 
@@ -3694,6 +3696,7 @@ static int stmmac_request_irq(struct net_device *dev)
 int stmmac_open(struct net_device *dev)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
+	int mode = priv->plat->phy_interface;
 	int bfsize = 0;
 	u32 chan;
 	int ret;
@@ -3706,7 +3709,8 @@ int stmmac_open(struct net_device *dev)
 
 	if (priv->hw->pcs != STMMAC_PCS_TBI &&
 	    priv->hw->pcs != STMMAC_PCS_RTBI &&
-	    priv->hw->xpcs_args.an_mode != DW_AN_C73) {
+	    (!priv->hw->xpcs ||
+	     xpcs_get_an_mode(priv->hw->xpcs, mode) != DW_AN_C73)) {
 		ret = stmmac_init_phy(dev);
 		if (ret) {
 			netdev_err(priv->dev,
@@ -5195,7 +5199,7 @@ read_again:
 
 		/* Buffer is good. Go on. */
 
-		prefetch(page_address(buf->page));
+		prefetch(page_address(buf->page) + buf->page_offset);
 		if (buf->sec_page)
 			prefetch(page_address(buf->sec_page));
 
@@ -5886,7 +5890,7 @@ static int stmmac_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 	if (!tc_cls_can_offload_and_chain0(priv->dev, type_data))
 		return ret;
 
-	stmmac_disable_all_queues(priv);
+	__stmmac_disable_all_queues(priv);
 
 	switch (type) {
 	case TC_SETUP_CLSU32:
@@ -5950,11 +5954,20 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
 	struct stmmac_priv *priv = netdev_priv(ndev);
 	int ret = 0;
 
+	ret = pm_runtime_get_sync(priv->device);
+	if (ret < 0) {
+		pm_runtime_put_noidle(priv->device);
+		return ret;
+	}
+
 	ret = eth_mac_addr(ndev, addr);
 	if (ret)
-		return ret;
+		goto set_mac_error;
 
 	stmmac_set_umac_addr(priv, priv->hw, ndev->dev_addr, 0);
+
+set_mac_error:
+	pm_runtime_put(priv->device);
 
 	return ret;
 }
@@ -6250,12 +6263,6 @@ static int stmmac_vlan_rx_add_vid(struct net_device *ndev, __be16 proto, u16 vid
 	bool is_double = false;
 	int ret;
 
-	ret = pm_runtime_get_sync(priv->device);
-	if (ret < 0) {
-		pm_runtime_put_noidle(priv->device);
-		return ret;
-	}
-
 	if (be16_to_cpu(proto) == ETH_P_8021AD)
 		is_double = true;
 
@@ -6280,6 +6287,12 @@ static int stmmac_vlan_rx_kill_vid(struct net_device *ndev, __be16 proto, u16 vi
 	struct stmmac_priv *priv = netdev_priv(ndev);
 	bool is_double = false;
 	int ret;
+
+	ret = pm_runtime_get_sync(priv->device);
+	if (ret < 0) {
+		pm_runtime_put_noidle(priv->device);
+		return ret;
+	}
 
 	if (be16_to_cpu(proto) == ETH_P_8021AD)
 		is_double = true;
@@ -6594,7 +6607,8 @@ static int stmmac_hw_init(struct stmmac_priv *priv)
 		 * register (if supported).
 		 */
 		priv->plat->enh_desc = priv->dma_cap.enh_desc;
-		priv->plat->pmt = priv->dma_cap.pmt_remote_wake_up;
+		priv->plat->pmt = priv->dma_cap.pmt_remote_wake_up &&
+				!priv->plat->use_phy_wol;
 		priv->hw->pmt = priv->plat->pmt;
 		if (priv->dma_cap.hash_tb_sz) {
 			priv->hw->multicast_filter_bins =
@@ -6903,6 +6917,11 @@ int stmmac_dvr_probe(struct device *device,
 			reset_control_reset(priv->plat->stmmac_rst);
 	}
 
+	ret = reset_control_deassert(priv->plat->stmmac_ahb_rst);
+	if (ret == -ENOTSUPP)
+		dev_err(priv->device, "unable to bring out of ahb reset: %pe\n",
+			ERR_PTR(ret));
+
 	/* Init MAC and get the capabilities */
 	ret = stmmac_hw_init(priv);
 	if (ret)
@@ -7054,6 +7073,15 @@ int stmmac_dvr_probe(struct device *device,
 		}
 	}
 
+	if (priv->plat->speed_mode_2500)
+		priv->plat->speed_mode_2500(ndev, priv->plat->bsp_priv);
+
+	if (priv->plat->mdio_bus_data && priv->plat->mdio_bus_data->has_xpcs) {
+		ret = stmmac_xpcs_setup(priv->mii);
+		if (ret)
+			goto error_xpcs_setup;
+	}
+
 	ret = stmmac_phy_setup(priv);
 	if (ret) {
 		netdev_err(ndev, "failed to setup phy (%d)\n", ret);
@@ -7090,6 +7118,7 @@ error_serdes_powerup:
 	unregister_netdev(ndev);
 error_netdev_register:
 	phylink_destroy(priv->phylink);
+error_xpcs_setup:
 error_phy_setup:
 	if (priv->hw->pcs != STMMAC_PCS_TBI &&
 	    priv->hw->pcs != STMMAC_PCS_RTBI)
@@ -7098,7 +7127,6 @@ error_mdio_register:
 	stmmac_napi_del(ndev);
 error_hw_init:
 	destroy_workqueue(priv->wq);
-	stmmac_bus_clks_config(priv, false);
 	bitmap_free(priv->af_xdp_zc_qps);
 
 	return ret;
@@ -7135,6 +7163,7 @@ int stmmac_dvr_remove(struct device *dev)
 	phylink_destroy(priv->phylink);
 	if (priv->plat->stmmac_rst)
 		reset_control_assert(priv->plat->stmmac_rst);
+	reset_control_assert(priv->plat->stmmac_ahb_rst);
 	pm_runtime_put(dev);
 	pm_runtime_disable(dev);
 	if (priv->hw->pcs != STMMAC_PCS_TBI &&
@@ -7220,6 +7249,7 @@ int stmmac_suspend(struct device *dev)
 				     priv->plat->rx_queues_to_use, false);
 
 		stmmac_fpe_handshake(priv, false);
+		stmmac_fpe_stop_wq(priv);
 	}
 
 	priv->speed = SPEED_UNKNOWN;

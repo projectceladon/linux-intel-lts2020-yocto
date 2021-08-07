@@ -74,6 +74,7 @@
 #include <linux/smp.h>
 #include <linux/list.h>
 #include <linux/mm.h>
+#include <linux/seq_file.h>
 #include "tcc_buffer.h"
 
 /*
@@ -249,7 +250,7 @@ static u32 errsize;
 static u32 tcc_init;
 static u32 ptct_format = FORMAT_V1;
 DEFINE_MUTEX(tccbuffer_mutex);
-
+static int tcc_errlog_show(struct seq_file *m, void *v);
 /****************************************************************************/
 /*These MACROs may not yet defined in previous kernel version*/
 #ifndef INTEL_FAM6_ALDERLAKE
@@ -282,6 +283,7 @@ static u64 hardware_prefetcher_disable_bits;
 
 static u64 get_hardware_prefetcher_disable_bits(void);
 static inline void tcc_perf_wrmsrl(u32 msr, u64 val);
+static int start_measure(void);
 static int tcc_perf_fn(void);
 
 #define MSR_MISC_FEATURE_CONTROL    0x000001a4
@@ -311,8 +313,9 @@ static u64 get_hardware_prefetcher_disable_bits(void)
 	return 0x5;
 	case INTEL_FAM6_ATOM_TREMONT:
 	return 0x1F;
+	default:
+		pr_err("Didn't catch CPU model in setting prefetcher disable bits.\n");
 	}
-	pr_err("Didn't catch CPU model in setting prefetcher disable bits.\n");
 	return 0;
 }
 
@@ -442,8 +445,8 @@ static int tcc_perf_fn(void)
 	asm volatile (" sti ");
 
 	if (cache_info_k.cache_level == RGN_L2) {
-		pr_err("PERFMARK perf_l2h=%llu perf_l2m=%llu", perf_l2h, perf_l2m);
-		pr_err("PERFMARK perf_l1h=%llu perf_l1m=%llu", perf_l1h, perf_l1m);
+		pr_err("PERFMARK perf_l2h=%-10llu perf_l2m=%-10llu", perf_l2h, perf_l2m);
+		pr_err("PERFMARK perf_l1h=%-10llu perf_l1m=%-10llu", perf_l1h, perf_l1m);
 		cache_info_k.l1_hits = perf_l1h;
 		cache_info_k.l1_miss = perf_l1m;
 		cache_info_k.l2_hits = perf_l2h;
@@ -451,8 +454,8 @@ static int tcc_perf_fn(void)
 		cache_info_k.l3_hits = 0;
 		cache_info_k.l3_miss = 0;
 	} else if (cache_info_k.cache_level == RGN_L3) {
-		pr_err("PERFMARK perf_l2h=%llu perf_l2m=%llu", perf_l2h, perf_l2m);
-		pr_err("PERFMARK perf_l3h=%llu perf_l3m=%llu", perf_l3h, perf_l3m);
+		pr_err("PERFMARK perf_l2h=%-10llu perf_l2m=%-10llu", perf_l2h, perf_l2m);
+		pr_err("PERFMARK perf_l3h=%-10llu perf_l3m=%-10llu", perf_l3h, perf_l3m);
 		cache_info_k.l1_hits = 0;
 		cache_info_k.l1_miss = 0;
 		cache_info_k.l2_hits = perf_l2h;
@@ -468,7 +471,7 @@ out:
 	return 0;
 }
 
-int start_measure(void)
+static int start_measure(void)
 {
 	int ret = -1;
 
@@ -487,9 +490,7 @@ int start_measure(void)
 	ret = 0;
 out:
 	return ret;
-
 }
-
 
 static ssize_t set_test_setup(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos)
 {
@@ -513,7 +514,7 @@ static ssize_t set_test_setup(struct file *file, const char __user *ubuf, size_t
 		if (cache_info_k_virt_addr == NULL)
 			pr_err("cache_info_k_virt_addr == NULL\n");
 		else
-			pr_err("cache_info_k_virt_addr	0x%016llx\n", (u64)(cache_info_k_virt_addr));
+			pr_err("cache_info_k_virt_addr       0x%px\n", cache_info_k_virt_addr);
 
 		if (start_measure() != 0)
 			pr_err("Something wrong with the cache performance measurement!");
@@ -577,7 +578,8 @@ static u32 utils_apicid(void)
 
 static int curr_process_cpu(void)
 {
-	u32 i = 0, cpu = 0xFFFF, apicid = 0;
+	u32 apicid = 0;
+	int i = 0, cpu = 0xFFFF;
 
 	apicid = utils_apicid();
 	for_each_online_cpu(i) {
@@ -649,23 +651,47 @@ static void tcc_get_psram_cpumask(u32 coreid, u32 num_threads_sharing, cpumask_t
 	u32 index_msb, id;
 	u32 apicid = 0;
 
+	index_msb = get_count_order(num_threads_sharing);
 	if (ptct_format == FORMAT_V2)
-		apicid = cpu_data(coreid).apicid;
+		apicid = coreid << index_msb;
 	else
 		apicid = coreid;
-
+	dprintk("apicid is %d from cacheid %d\n", apicid, coreid);
 	apicid_start = apicid & (~(num_threads_sharing - 1));
 	apicid_end = apicid_start + num_threads_sharing;
-
+	dprintk("apicid_start %d  apicid_end %d\n", apicid_start, apicid_end);
 	for_each_online_cpu(i) {
 		if ((cpu_data(i).apicid >= apicid_start) &&
 			(cpu_data(i).apicid < apicid_end))
 			cpumask_set_cpu(i, mask);
-		index_msb = get_count_order(num_threads_sharing);
 		id = cpu_data(i).apicid >> index_msb;
-		dprintk("cpu_data(%d).apicid %d\tnum_threads_sharing %d\tmsb %d\tcache_id %d\n", i, cpu_data(i).apicid, num_threads_sharing, index_msb, id);
+		dprintk("cpu_data(%d).apicid %2d\tnum_threads_sharing %d\tmsb %d\tcache_id %d\n", i, cpu_data(i).apicid, num_threads_sharing, index_msb, id);
 	}
 	dprintk("Cachel level dependent! apicid  %d  num_threads_sharing %d ==> cpumask %lx\n", apicid, num_threads_sharing, *(unsigned long *)mask);
+}
+
+static int tcc_errlog_show(struct seq_file *m, void *v)
+{
+	void *errlog_buff = NULL;
+	u32 i = 0;
+	int ret = 0;
+
+	if (errsize > 0) {
+		errlog_buff = memremap(erraddr, errsize, MEMREMAP_WB);
+		if (!errlog_buff) {
+			seq_puts(m, "System error. Fail to map this errlog kernel address.\n");
+			ret = -ENOMEM;
+		} else {
+			seq_printf(m, "errlog_addr   @ %016llx\n", erraddr);
+			seq_printf(m, "errlog_size   @ %08x\n", errsize);
+			for (i = 0; i < errsize; i += sizeof(int))
+				seq_printf(m, "%08x\n", ((u32 *)errlog_buff)[i/sizeof(int)]);
+			memunmap(errlog_buff);
+		}
+	} else
+		seq_puts(m, "No TCC Error Log Buffer.\n");
+
+	return ret;
 }
 
 static int tcc_parse_ptct(void)
@@ -745,8 +771,6 @@ static int tcc_parse_ptct(void)
 			entry_errlog_v2 = (struct tcc_ptct_errlog_v2 *)(tbl_swap + ENTRY_HEADER_SIZE);
 			erraddr = ((u64)(entry_errlog_v2->erraddr_hi) << 32) | entry_errlog_v2->erraddr_lo;
 			errsize = entry_errlog_v2->errsize;
-			dprintk("erraddr   @ %016llx\n", erraddr);
-			dprintk("errsize   @ %08x\n", errsize);
 		}
 
 		offset += entry_size / sizeof(u32);
@@ -1070,8 +1094,9 @@ struct mem_s {
 	void *vaddr;
 	size_t size;
 };
+static void clear_mem(void *info);
 
-void clear_mem(void *info)
+static void clear_mem(void *info)
 {
 	struct mem_s *mem = (struct mem_s *) info;
 
@@ -1280,7 +1305,6 @@ static long tcc_buffer_ioctl(struct file *filp, unsigned int cmd, unsigned long 
 	u64 register_phyaddr;
 	void *register_data = NULL;
 	void *errlog_buff = NULL;
-	u32 i = 0;
 
 	int cpu, testmask = 0;
 
@@ -1475,15 +1499,10 @@ static long tcc_buffer_ioctl(struct file *filp, unsigned int cmd, unsigned long 
 			pr_err("cannot map this errlog address");
 			return -ENOMEM;
 		}
-
-		for (i = 0; ((i < (errsize/sizeof(int))) && (tccdbg == 1)); i++)
-			pr_err("%08x\t", ((u32 *)errlog_buff)[i]);
-
 		ret = copy_to_user((u32 *)arg, errlog_buff, errsize);
 		memunmap(errlog_buff);
 		if (ret != 0)
 			return -EFAULT;
-
 		break;
 	default:
 		return -ENOIOCTLCMD;
@@ -1583,7 +1602,7 @@ static int __init tcc_buffer_init(void)
 	}
 
 	ent = proc_create("tcc_cache_test", 0660, NULL, &testops);
-
+	proc_create_single("tcc_errlog", 0, NULL, tcc_errlog_show);
 	tcc_init = 1;
 	p_tcc_config->minor = new_minor;
 
@@ -1611,6 +1630,7 @@ static void __exit tcc_buffer_exit(void)
 		kfree(p_tcc_config);
 
 		proc_remove(ent);
+		remove_proc_entry("tcc_errlog", NULL);
 	}
 	pr_err("exit().\n");
 }

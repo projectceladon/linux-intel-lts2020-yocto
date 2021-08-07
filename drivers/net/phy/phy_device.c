@@ -853,6 +853,18 @@ struct phy_device *get_phy_device(struct mii_bus *bus, int addr, bool is_c45)
 	if (r)
 		return ERR_PTR(r);
 
+	/* PHY device such as the Marvell Alaska 88E2110 will return a PHY ID
+	 * of 0 when probed using get_phy_c22_id() with no error. Proceed to
+	 * probe with C45 to see if we're able to get a valid PHY ID in the C45
+	 * space, if successful, create the C45 PHY device.
+	 */
+	if (!is_c45 && phy_id == 0 && bus->probe_capabilities >= MDIOBUS_C45) {
+		r = get_phy_c45_ids(bus, addr, &c45_ids);
+		if (!r)
+			return phy_device_create(bus, addr, phy_id,
+						 true, &c45_ids);
+	}
+
 	return phy_device_create(bus, addr, phy_id, is_c45, &c45_ids);
 }
 EXPORT_SYMBOL(get_phy_device);
@@ -917,6 +929,20 @@ void phy_device_remove(struct phy_device *phydev)
 	mdiobus_unregister_device(&phydev->mdio);
 }
 EXPORT_SYMBOL(phy_device_remove);
+
+/**
+ * phy_get_c45_ids - Read 802.3-c45 IDs for phy device.
+ * @phydev: phy_device structure to read 802.3-c45 IDs
+ *
+ * Returns zero on success, %-EIO on bus access error, or %-ENODEV if
+ * the "devices in package" is invalid.
+ */
+int phy_get_c45_ids(struct phy_device *phydev)
+{
+	return get_phy_c45_ids(phydev->mdio.bus, phydev->mdio.addr,
+			       &phydev->c45_ids);
+}
+EXPORT_SYMBOL(phy_get_c45_ids);
 
 /**
  * phy_find_first - finds the first PHY device on the bus

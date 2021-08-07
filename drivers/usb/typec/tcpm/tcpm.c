@@ -3153,10 +3153,10 @@ static unsigned int tcpm_pd_select_pps_apdo(struct tcpm_port *port)
 		port->pps_data.req_max_volt = min(pdo_pps_apdo_max_voltage(src),
 						  pdo_pps_apdo_max_voltage(snk));
 		port->pps_data.req_max_curr = min_pps_apdo_current(src, snk);
-		port->pps_data.req_out_volt = min(port->pps_data.max_volt,
-						  max(port->pps_data.min_volt,
+		port->pps_data.req_out_volt = min(port->pps_data.req_max_volt,
+						  max(port->pps_data.req_min_volt,
 						      port->pps_data.req_out_volt));
-		port->pps_data.req_op_curr = min(port->pps_data.max_curr,
+		port->pps_data.req_op_curr = min(port->pps_data.req_max_curr,
 						 port->pps_data.req_op_curr);
 	}
 
@@ -6348,6 +6348,10 @@ EXPORT_SYMBOL_GPL(tcpm_register_port);
 void tcpm_unregister_port(struct tcpm_port *port)
 {
 	int i;
+
+	hrtimer_cancel(&port->enable_frs_timer);
+	hrtimer_cancel(&port->vdm_state_machine_timer);
+	hrtimer_cancel(&port->state_machine_timer);
 
 	tcpm_reset_port(port);
 	for (i = 0; i < ARRAY_SIZE(port->port_altmode); i++)
