@@ -2122,6 +2122,7 @@ static const struct hda_controller_ops pci_hda_ops = {
 static int azx_probe(struct pci_dev *pci,
 		     const struct pci_device_id *pci_id)
 {
+	printk("LOGS_ENABLE Entered func %s\n", __func__);
 	static int dev;
 	struct snd_card *card;
 	struct hda_intel *hda;

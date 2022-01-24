@@ -343,6 +343,7 @@ static void sof_pci_probe_complete(struct device *dev)
 static int sof_pci_probe(struct pci_dev *pci,
 			 const struct pci_device_id *pci_id)
 {
+	printk("LOGS_ENABLE Entered function %s\n", __func__);
 	struct device *dev = &pci->dev;
 	const struct sof_dev_desc *desc =
 		(const struct sof_dev_desc *)pci_id->driver_data;

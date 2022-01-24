@@ -11,7 +11,9 @@ struct nhlt_acpi_table *intel_nhlt_init(struct device *dev)
 
 	status = acpi_get_table(ACPI_SIG_NHLT, 0,
 				(struct acpi_table_header **)&nhlt);
+	printk("LOGS_ENABLE Entered function %s\n", __func__);
 	if (ACPI_FAILURE(status)) {
+		printk("LOGS_ENABLE Entered1 function %s\n", __func__);
 		dev_warn(dev, "NHLT table not found\n");
 		return NULL;
 	}

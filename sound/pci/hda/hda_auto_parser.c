@@ -410,6 +410,7 @@ int snd_hda_parse_pin_defcfg(struct hda_codec *codec,
 	/*
 	 * debug prints of the parsed results
 	 */
+	printk("LOGS_ENABLE Entered func %s\n", __func__);
 	codec_info(codec, "autoconfig for %s: line_outs=%d (0x%x/0x%x/0x%x/0x%x/0x%x) type:%s\n",
 		   codec->core.chip_name, cfg->line_outs, cfg->line_out_pins[0],
 		   cfg->line_out_pins[1], cfg->line_out_pins[2],
