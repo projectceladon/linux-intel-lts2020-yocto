@@ -381,12 +381,13 @@ static int snd_intel_dsp_check_soundwire(struct pci_dev *pci)
 int snd_intel_dsp_driver_probe(struct pci_dev *pci)
 {
 	const struct config_entry *cfg;
-
+	printk("LOGS_ENABLE Entered func %s\n", __func__);
 	/* Intel vendor only */
 	if (pci->vendor != 0x8086)
 		return SND_INTEL_DSP_DRIVER_ANY;
-
+	printk("LOGS_ENABLE dsp_driver value is %d\n", dsp_driver);
 	if (dsp_driver > 0 && dsp_driver <= SND_INTEL_DSP_DRIVER_LAST)
+		printk("LOGS_ENABLE dsp_driver IF CASE value is %d\n", dsp_driver);
 		return dsp_driver;
 
 	/*
@@ -400,9 +401,10 @@ int snd_intel_dsp_driver_probe(struct pci_dev *pci)
 		return SND_INTEL_DSP_DRIVER_LEGACY;
 	if (pci->class != 0x040100 && pci->class != 0x040380) {
 		dev_err(&pci->dev, "Unknown PCI class/subclass/prog-if information (0x%06x) found, selecting HDAudio legacy driver\n", pci->class);
+		printk("LOGS_ENABLE Entered1 function %s\n", __func__);
 		return SND_INTEL_DSP_DRIVER_LEGACY;
 	}
-
+	printk("LOGS_ENABLE Entered2 function %s\n", __func__);
 	dev_info(&pci->dev, "DSP detected with PCI class/subclass/prog-if info 0x%06x\n", pci->class);
 
 	/* find the configuration for the specific device */

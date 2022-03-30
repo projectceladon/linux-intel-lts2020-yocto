@@ -757,6 +757,7 @@ int hda_dsp_probe(struct snd_sof_dev *sdev)
 		dev_err(sdev->dev, "error: unknown PCI class/subclass/prog-if 0x%06x found, aborting probe\n", pci->class);
 		return -ENODEV;
 	}
+	printk("LOGS_ENABLE Entered function %s\n", __func__);
 	dev_info(sdev->dev, "DSP detected with PCI class/subclass/prog-if 0x%06x\n", pci->class);
 
 	chip = get_chip_info(sdev->pdata);
